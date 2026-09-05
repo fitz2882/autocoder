@@ -20,6 +20,8 @@ jobs:
         run: ruff check .
       - name: Run security tests
         run: python test_security.py
+      - name: Run local session boundary tests
+        run: python -m pytest tests/test_local_session.py -q
 
   ui:
     runs-on: ubuntu-latest
@@ -35,6 +37,8 @@ jobs:
           cache-dependency-path: ui/package-lock.json
       - name: Install dependencies
         run: npm ci
+      - name: Test session recovery
+        run: node --test test-session-retry.mjs
       - name: Lint
         run: npm run lint
       - name: Type check & Build

@@ -2,6 +2,7 @@
  * WebSocket Hook for Real-time Updates
  */
 
+import { openLocalWebSocket } from '../lib/localSession'
 import { useEffect, useRef, useState, useCallback } from 'react'
 import type { WSMessage, AgentStatus } from '../lib/types'
 
@@ -28,10 +29,11 @@ export function useProjectWebSocket(projectName: string | null) {
   })
 
   const wsRef = useRef<WebSocket | null>(null)
+  const pendingConnectRef = useRef<AbortController | null>(null)
   const reconnectTimeoutRef = useRef<number | null>(null)
   const reconnectAttempts = useRef(0)
 
-  const connect = useCallback(() => {
+  const connect = useCallback(async () => {
     if (!projectName) return
 
     // Build WebSocket URL
@@ -39,11 +41,16 @@ export function useProjectWebSocket(projectName: string | null) {
     const host = window.location.host
     const wsUrl = `${protocol}//${host}/ws/projects/${encodeURIComponent(projectName)}`
 
+    pendingConnectRef.current?.abort()
+    const pending = new AbortController()
+    pendingConnectRef.current = pending
     try {
-      const ws = new WebSocket(wsUrl)
+      const ws = await openLocalWebSocket(wsUrl, pending.signal)
+      if (!ws) return null
       wsRef.current = ws
 
       ws.onopen = () => {
+        if (pending.signal.aborted) return
         setState(prev => ({ ...prev, isConnected: true }))
         reconnectAttempts.current = 0
       }
@@ -96,6 +103,7 @@ export function useProjectWebSocket(projectName: string | null) {
       }
 
       ws.onclose = () => {
+        if (pending.signal.aborted) return
         setState(prev => ({ ...prev, isConnected: false }))
         wsRef.current = null
 
@@ -112,7 +120,9 @@ export function useProjectWebSocket(projectName: string | null) {
         ws.close()
       }
     } catch {
-      // Failed to connect, will retry via onclose
+      if (!pending.signal.aborted) {
+        reconnectTimeoutRef.current = window.setTimeout(() => { void connect() }, 1000)
+      }
     }
   }, [projectName])
 
@@ -140,6 +150,7 @@ export function useProjectWebSocket(projectName: string | null) {
     const pingInterval = setInterval(sendPing, 30000)
 
     return () => {
+      pendingConnectRef.current?.abort()
       clearInterval(pingInterval)
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current)

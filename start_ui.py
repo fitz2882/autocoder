@@ -141,13 +141,7 @@ def install_npm_deps() -> bool:
 
 
 def build_frontend() -> bool:
-    """Build the React frontend if dist doesn't exist."""
-    dist_dir = UI_DIR / "dist"
-
-    if dist_dir.exists():
-        print("  Frontend already built")
-        return True
-
+    """Build the matching frontend, including session bootstrap updates."""
     print("  Building React frontend...")
     npm_cmd = "npm.cmd" if sys.platform == "win32" else "npm"
     return run_command([npm_cmd, "run", "build"], cwd=UI_DIR)
@@ -161,19 +155,24 @@ def start_dev_server(port: int) -> tuple:
     print(f"  - FastAPI backend: http://127.0.0.1:{port}")
     print("  - Vite frontend:   http://127.0.0.1:5173")
 
+    backend_env = os.environ.copy()
+    backend_env["AUTOCODER_PORT"] = str(port)
+    backend_env["AUTOCODER_DEV_PORT"] = "5173"
     # Start FastAPI
     backend = subprocess.Popen([
         str(venv_python), "-m", "uvicorn",
         "server.main:app",
+        "--no-proxy-headers",
         "--host", "127.0.0.1",
         "--port", str(port),
         "--reload"
-    ], cwd=str(ROOT))
+    ], cwd=str(ROOT), env=backend_env)
 
     # Start Vite with API port env var for proxy configuration
     npm_cmd = "npm.cmd" if sys.platform == "win32" else "npm"
     vite_env = os.environ.copy()
     vite_env["VITE_API_PORT"] = str(port)
+    vite_env["AUTOCODER_DEV_PORT"] = "5173"
     frontend = subprocess.Popen([
         npm_cmd, "run", "dev"
     ], cwd=str(UI_DIR), env=vite_env)
@@ -187,12 +186,16 @@ def start_production_server(port: int):
 
     print(f"\n  Starting server at http://127.0.0.1:{port}")
 
+    backend_env = os.environ.copy()
+    backend_env["AUTOCODER_PORT"] = str(port)
+    backend_env.pop("AUTOCODER_DEV_PORT", None)
     return subprocess.Popen([
         str(venv_python), "-m", "uvicorn",
         "server.main:app",
+        "--no-proxy-headers",
         "--host", "127.0.0.1",
         "--port", str(port)
-    ], cwd=str(ROOT))
+    ], cwd=str(ROOT), env=backend_env)
 
 
 def main() -> None:
@@ -254,6 +257,12 @@ def main() -> None:
 
             # Open browser to Vite dev server
             time.sleep(3)
+            if backend.poll() is not None or frontend.poll() is not None:
+                backend.terminate()
+                frontend.terminate()
+                backend.wait()
+                frontend.wait()
+                raise RuntimeError("Development server failed to start. Check that port 5173 is free.")
             webbrowser.open("http://127.0.0.1:5173")
 
             print("\n" + "=" * 50)

@@ -134,7 +134,7 @@ export function useSpecChat({
     return () => clearTimeout(startDelay)
   }, [projectName, isComplete])
 
-  const connect = useCallback(async () => {
+  const connect = useCallback(async (): Promise<WebSocket | null> => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       return wsRef.current
     }
@@ -148,12 +148,31 @@ export function useSpecChat({
     pendingConnectRef.current?.abort()
     const pending = new AbortController()
     pendingConnectRef.current = pending
+    const retry = async (): Promise<WebSocket | null> => {
+      if (pending.signal.aborted || reconnectAttempts.current >= maxReconnectAttempts || isCompleteRef.current) return null
+      reconnectAttempts.current++
+      const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 10000)
+      const shouldRetry = await new Promise<boolean>((resolve) => {
+        const cancel = () => {
+          if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current)
+          resolve(false)
+        }
+        pending.signal.addEventListener('abort', cancel, { once: true })
+        reconnectTimeoutRef.current = window.setTimeout(() => {
+          pending.signal.removeEventListener('abort', cancel)
+          reconnectTimeoutRef.current = null
+          resolve(true)
+        }, delay)
+      })
+      if (!shouldRetry || pending.signal.aborted || isCompleteRef.current) return null
+      return connect()
+    }
     let connection: WebSocket | null
     try {
       connection = await openLocalWebSocket(wsUrl, pending.signal)
     } catch {
       if (!pending.signal.aborted) setConnectionStatus('error')
-      return null
+      return retry()
     }
     if (!connection) return null
     const ws = connection
@@ -180,12 +199,7 @@ export function useSpecChat({
         pingIntervalRef.current = null
       }
 
-      // Attempt reconnection if not intentionally closed
-      if (reconnectAttempts.current < maxReconnectAttempts && !isCompleteRef.current) {
-        reconnectAttempts.current++
-        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 10000)
-        reconnectTimeoutRef.current = window.setTimeout(connect, delay)
-      }
+      void retry()
     }
 
     ws.onerror = () => {

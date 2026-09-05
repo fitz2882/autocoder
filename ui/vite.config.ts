@@ -15,10 +15,14 @@ export default defineConfig({
     },
   },
   server: {
+    port: Number(process.env.AUTOCODER_DEV_PORT || 5173),
+    strictPort: true,
+    host: '127.0.0.1',
     proxy: {
       '/api': {
         target: `http://127.0.0.1:${apiPort}`,
         changeOrigin: true,
+        ws: true,
       },
       '/ws': {
         target: `ws://127.0.0.1:${apiPort}`,

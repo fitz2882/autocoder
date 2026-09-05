@@ -2,6 +2,7 @@
  * Hook for managing assistant chat WebSocket connection
  */
 
+import { openLocalWebSocket } from '../lib/localSession'
 import { useState, useCallback, useRef, useEffect } from 'react'
 import type { ChatMessage, AssistantChatServerMessage } from '../lib/types'
 
@@ -37,6 +38,7 @@ export function useAssistantChat({
   const [conversationId, setConversationId] = useState<number | null>(null)
 
   const wsRef = useRef<WebSocket | null>(null)
+  const pendingConnectRef = useRef<AbortController | null>(null)
   const currentAssistantMessageRef = useRef<string | null>(null)
   const reconnectAttempts = useRef(0)
   const maxReconnectAttempts = 3
@@ -46,6 +48,7 @@ export function useAssistantChat({
   // Clean up on unmount
   useEffect(() => {
     return () => {
+      pendingConnectRef.current?.abort()
       if (pingIntervalRef.current) {
         clearInterval(pingIntervalRef.current)
       }
@@ -56,13 +59,13 @@ export function useAssistantChat({
         wsRef.current.close()
       }
     }
-  }, [])
+  }, [projectName])
 
-  const connect = useCallback(() => {
+  const connect = useCallback(async () => {
     // Prevent multiple connection attempts
     if (wsRef.current?.readyState === WebSocket.OPEN ||
         wsRef.current?.readyState === WebSocket.CONNECTING) {
-      return
+      return wsRef.current
     }
 
     setConnectionStatus('connecting')
@@ -71,10 +74,22 @@ export function useAssistantChat({
     const host = window.location.host
     const wsUrl = `${protocol}//${host}/api/assistant/ws/${encodeURIComponent(projectName)}`
 
-    const ws = new WebSocket(wsUrl)
+    pendingConnectRef.current?.abort()
+    const pending = new AbortController()
+    pendingConnectRef.current = pending
+    let connection: WebSocket | null
+    try {
+      connection = await openLocalWebSocket(wsUrl, pending.signal)
+    } catch {
+      if (!pending.signal.aborted) setConnectionStatus('error')
+      return null
+    }
+    if (!connection) return null
+    const ws = connection
     wsRef.current = ws
 
     ws.onopen = () => {
+      if (pending.signal.aborted) return
       setConnectionStatus('connected')
       reconnectAttempts.current = 0
 
@@ -87,6 +102,7 @@ export function useAssistantChat({
     }
 
     ws.onclose = () => {
+      if (pending.signal.aborted) return
       setConnectionStatus('disconnected')
       if (pingIntervalRef.current) {
         clearInterval(pingIntervalRef.current)
@@ -204,27 +220,27 @@ export function useAssistantChat({
         console.error('Failed to parse WebSocket message:', e)
       }
     }
+    return ws
   }, [projectName, onError])
 
   const start = useCallback((existingConversationId?: number | null) => {
-    connect()
-
-    // Wait for connection then send start message
-    const checkAndSend = () => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        setIsLoading(true)
-        const payload: { type: string; conversation_id?: number } = { type: 'start' }
-        if (existingConversationId) {
-          payload.conversation_id = existingConversationId
-          setConversationId(existingConversationId)
+    void connect().then((socket) => {
+      if (!socket) return
+      const checkAndSend = () => {
+        if (socket.readyState === WebSocket.OPEN) {
+          setIsLoading(true)
+          const payload: { type: string; conversation_id?: number } = { type: 'start' }
+          if (existingConversationId) {
+            payload.conversation_id = existingConversationId
+            setConversationId(existingConversationId)
+          }
+          socket.send(JSON.stringify(payload))
+        } else if (socket.readyState === WebSocket.CONNECTING) {
+          setTimeout(checkAndSend, 100)
         }
-        wsRef.current.send(JSON.stringify(payload))
-      } else if (wsRef.current?.readyState === WebSocket.CONNECTING) {
-        setTimeout(checkAndSend, 100)
       }
-    }
-
-    setTimeout(checkAndSend, 100)
+      checkAndSend()
+    })
   }, [connect])
 
   const sendMessage = useCallback((content: string) => {
@@ -256,6 +272,7 @@ export function useAssistantChat({
   }, [onError])
 
   const disconnect = useCallback(() => {
+    pendingConnectRef.current?.abort()
     reconnectAttempts.current = maxReconnectAttempts // Prevent reconnection
     if (pingIntervalRef.current) {
       clearInterval(pingIntervalRef.current)

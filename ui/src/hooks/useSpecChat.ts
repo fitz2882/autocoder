@@ -2,6 +2,7 @@
  * Hook for managing spec creation chat WebSocket connection
  */
 
+import { openLocalWebSocket } from '../lib/localSession'
 import { useState, useCallback, useRef, useEffect } from 'react'
 import type { ChatMessage, ImageAttachment, SpecChatServerMessage, SpecQuestion } from '../lib/types'
 import { getSpecStatus } from '../lib/api'
@@ -44,6 +45,7 @@ export function useSpecChat({
   const [currentToolId, setCurrentToolId] = useState<string | null>(null)
 
   const wsRef = useRef<WebSocket | null>(null)
+  const pendingConnectRef = useRef<AbortController | null>(null)
   const currentAssistantMessageRef = useRef<string | null>(null)
   const reconnectAttempts = useRef(0)
   const maxReconnectAttempts = 3
@@ -59,6 +61,7 @@ export function useSpecChat({
   // Clean up on unmount
   useEffect(() => {
     return () => {
+      pendingConnectRef.current?.abort()
       if (pingIntervalRef.current) {
         clearInterval(pingIntervalRef.current)
       }
@@ -69,7 +72,7 @@ export function useSpecChat({
         wsRef.current.close()
       }
     }
-  }, [])
+  }, [projectName])
 
   // Poll status file as fallback completion detection
   // Claude writes .spec_status.json when done with all spec work
@@ -131,9 +134,9 @@ export function useSpecChat({
     return () => clearTimeout(startDelay)
   }, [projectName, isComplete])
 
-  const connect = useCallback(() => {
+  const connect = useCallback(async () => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      return
+      return wsRef.current
     }
 
     setConnectionStatus('connecting')
@@ -142,10 +145,22 @@ export function useSpecChat({
     const host = window.location.host
     const wsUrl = `${protocol}//${host}/api/spec/ws/${encodeURIComponent(projectName)}`
 
-    const ws = new WebSocket(wsUrl)
+    pendingConnectRef.current?.abort()
+    const pending = new AbortController()
+    pendingConnectRef.current = pending
+    let connection: WebSocket | null
+    try {
+      connection = await openLocalWebSocket(wsUrl, pending.signal)
+    } catch {
+      if (!pending.signal.aborted) setConnectionStatus('error')
+      return null
+    }
+    if (!connection) return null
+    const ws = connection
     wsRef.current = ws
 
     ws.onopen = () => {
+      if (pending.signal.aborted) return
       setConnectionStatus('connected')
       reconnectAttempts.current = 0
 
@@ -158,6 +173,7 @@ export function useSpecChat({
     }
 
     ws.onclose = () => {
+      if (pending.signal.aborted) return
       setConnectionStatus('disconnected')
       if (pingIntervalRef.current) {
         clearInterval(pingIntervalRef.current)
@@ -346,22 +362,22 @@ export function useSpecChat({
         console.error('Failed to parse WebSocket message:', e)
       }
     }
+    return ws
   }, [projectName, onComplete, onError])
 
   const start = useCallback(() => {
-    connect()
-
-    // Wait for connection then send start message
-    const checkAndSend = () => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        setIsLoading(true)
-        wsRef.current.send(JSON.stringify({ type: 'start' }))
-      } else if (wsRef.current?.readyState === WebSocket.CONNECTING) {
-        setTimeout(checkAndSend, 100)
+    void connect().then((socket) => {
+      if (!socket) return
+      const checkAndSend = () => {
+        if (socket.readyState === WebSocket.OPEN) {
+          setIsLoading(true)
+          socket.send(JSON.stringify({ type: 'start' }))
+        } else if (socket.readyState === WebSocket.CONNECTING) {
+          setTimeout(checkAndSend, 100)
+        }
       }
-    }
-
-    setTimeout(checkAndSend, 100)
+      checkAndSend()
+    })
   }, [connect])
 
   const sendMessage = useCallback((content: string, attachments?: ImageAttachment[]) => {
@@ -444,6 +460,7 @@ export function useSpecChat({
   }, [currentToolId, onError])
 
   const disconnect = useCallback(() => {
+    pendingConnectRef.current?.abort()
     reconnectAttempts.current = maxReconnectAttempts // Prevent reconnection
     if (pingIntervalRef.current) {
       clearInterval(pingIntervalRef.current)

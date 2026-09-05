@@ -20,6 +20,8 @@ jobs:
         run: ruff check .
       - name: Run security tests
         run: python test_security.py
+      - name: Run local session boundary tests
+        run: python -m pytest tests/test_local_session.py -q
 
   ui:
     runs-on: ubuntu-latest

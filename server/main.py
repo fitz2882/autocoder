@@ -15,6 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from .local_session import LocalWebSocketMiddleware, policy
+from .local_session import router as session_router
 from .routers import (
     agent_router,
     assistant_chat_router,
@@ -56,12 +58,7 @@ app = FastAPI(
 # CORS - allow only localhost origins for security
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",      # Vite dev server
-        "http://127.0.0.1:5173",
-        "http://localhost:8888",      # Production
-        "http://127.0.0.1:8888",
-    ],
+    allow_origins=sorted(policy.origins),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -71,6 +68,10 @@ app.add_middleware(
 # ============================================================================
 # Security Middleware
 # ============================================================================
+
+app.add_middleware(LocalWebSocketMiddleware)
+app.include_router(session_router)
+
 
 @app.middleware("http")
 async def require_localhost(request: Request, call_next):
@@ -182,4 +183,5 @@ if __name__ == "__main__":
         host="127.0.0.1",  # Localhost only for security
         port=8888,
         reload=True,
+        proxy_headers=False,
     )
